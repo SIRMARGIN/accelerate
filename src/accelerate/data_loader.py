@@ -15,7 +15,7 @@
 import importlib
 import math
 from contextlib import suppress
-from typing import Callable, List, Optional, Union
+from typing import Callable, Optional, Union
 
 import torch
 from packaging import version
@@ -32,6 +32,7 @@ from .utils import (
     find_batch_size,
     get_data_structure,
     initialize_tensors,
+    is_datasets_available,
     is_torch_version,
     is_torchdata_stateful_dataloader_available,
     send_to_device,
@@ -74,7 +75,7 @@ class SeedableRandomSampler(RandomSampler):
     Same as a random sampler, except that in `__iter__` a seed can be used.
 
     Needed specifically in distributed cases, when the random generator for each GPU needs to start from the same seed
-    and be fully reproducable on multiple iterations.
+    and be fully reproducible on multiple iterations.
 
     If a custom `generator` is passed, it will rely on its initial seed as well as the current iteration it is on
     (stored in `self.epoch`).
@@ -89,7 +90,9 @@ class SeedableRandomSampler(RandomSampler):
 
     def __iter__(self):
         if self.generator is None:
-            self.generator = torch.Generator()
+            self.generator = torch.Generator(
+                device=torch.get_default_device() if hasattr(torch, "get_default_device") else "cpu"
+            )
             self.generator.manual_seed(self.initial_seed)
 
         # Allow `self.epoch` to modify the seed of the generator
@@ -307,7 +310,7 @@ class IterableDatasetShard(IterableDataset):
                 f"To use `IterableDatasetShard` in `split_batches` mode, the batch size ({batch_size}) "
                 f"needs to be a round multiple of the number of processes ({num_processes})."
             )
-        self.dataset = dataset
+        self.dataset: IterableDataset = dataset
         self.batch_size = batch_size
         self.drop_last = drop_last
         self.num_processes = num_processes
@@ -405,7 +408,7 @@ class DataLoaderStateMixin:
 class DataLoaderAdapter:
     """
     A class which wraps around a PyTorch `DataLoader` (or variants of it) to be used with the `Accelerator`. For
-    compatability reasons, this class inherits from the class it wraps around, so it can be used as a drop-in.
+    compatibility reasons, this class inherits from the class it wraps around, so it can be used as a drop-in.
     """
 
     def __init__(self, dataset, use_stateful_dataloader=False, batch_sampler=None, **kwargs):
@@ -448,8 +451,8 @@ class DataLoaderAdapter:
     @property
     def __class__(self):
         """
-        In order to maintain backwards compatability with other code, we need to ensure `isinstance(obj, DataLoader)`
-        returs true. This is because some downstream code assumes that the `DataLoader` is the base class of the
+        In order to maintain backwards compatibility with other code, we need to ensure `isinstance(obj, DataLoader)`
+        returns true. This is because some downstream code assumes that the `DataLoader` is the base class of the
         object.
         """
         return self.base_dataloader.__class__
@@ -563,7 +566,8 @@ class DataLoaderShard(DataLoaderAdapter, DataLoaderStateMixin):
         try:
             current_batch = next(dataloader_iter)
         except StopIteration:
-            yield
+            self.end()
+            return
 
         batch_index = 0
         while True:
@@ -604,6 +608,12 @@ class DataLoaderShard(DataLoaderAdapter, DataLoaderStateMixin):
             self.batch_sampler.set_epoch(epoch)
         if hasattr(self.batch_sampler, "sampler") and hasattr(self.batch_sampler.sampler, "set_epoch"):
             self.batch_sampler.sampler.set_epoch(epoch)
+        if (
+            hasattr(self.batch_sampler, "batch_sampler")
+            and hasattr(self.batch_sampler.batch_sampler, "sampler")
+            and hasattr(self.batch_sampler.batch_sampler.sampler, "set_epoch")
+        ):
+            self.batch_sampler.batch_sampler.sampler.set_epoch(epoch)
         # We support if a custom `Dataset` implementation has `set_epoch`
         # or in general HF datasets `Datasets`
         elif hasattr(self.dataset, "set_epoch"):
@@ -753,12 +763,12 @@ class DataLoaderDispatcher(DataLoaderAdapter, DataLoaderStateMixin):
 
         # if a device mesh is provided extract each dimension (dp, fsdp, tp)
         # device mesh may hold any number of dimensions, however,
-        # below code is for targetted support for dp, fsdp and tp
+        # below code is for targeted support for dp, fsdp and tp
 
         # device mesh will be used only if there is tp involved
         # or any multi-dimensional parallelism involving tp
         # (dp, tp) (fsdp, tp) (dp, fsdp, tp)
-        # otherwise the default behavour not using device mesh should be sufficient
+        # otherwise the default behaviour not using device mesh should be sufficient
         # since multi dimensional parallelism devoid of tp would anyway need
         # different batches for each process irrespective of dp or fsdp
         self.submesh_tp = None
@@ -990,7 +1000,7 @@ def prepare_data_loader(
     process_index: Optional[int] = None,
     split_batches: bool = False,
     put_on_device: bool = False,
-    rng_types: Optional[List[Union[str, RNGType]]] = None,
+    rng_types: Optional[list[Union[str, RNGType]]] = None,
     dispatch_batches: Optional[bool] = None,
     even_batches: bool = True,
     slice_fn_for_dispatch: Optional[Callable] = None,
@@ -1053,7 +1063,7 @@ def prepare_data_loader(
             ignored otherwise.
         use_seedable_sampler (`bool`, *optional*, defaults to `False`):
             Whether to use the [`~data_loader.SeedableRandomSampler`] instead of a `RandomSampler` for better
-            reproducability. Comes at a cost of potentially different performances due to different shuffling
+            reproducibility. Comes at a cost of potentially different performances due to different shuffling
             algorithms but ensures results will be the *exact* same. Should be paired with `set_seed()` at every
             `self.set_epoch`
         data_seed (`int`, *optional*, defaults to `None`):
@@ -1096,27 +1106,43 @@ def prepare_data_loader(
     if process_index is None:
         process_index = state.process_index
 
-    # when device mesh is used, specifically with TP
-    # then there is need to update process_index and num_processes
-    # to bring in the effect of generating same batch across TP ranks
-    # and different batch across FSDP and DP ranks.
-    # Example:
-    # if device mesh is (dp,fsdp,tp) = (2, 2, 3)
-    # ranks would range from 0...11
-    # from data angle ranks should look like 0 0 0 1 1 1 2 2 2 3 3 3
-    # processes with same ranks/ids would receive the same batch
     if torch_device_mesh:
-        submesh_fsdp_size = 1
-        submesh_dp_size = 1
-        submesh_tp_size = 1
-        if "tp" in torch_device_mesh.mesh_dim_names:
-            submesh_tp_size = torch_device_mesh["tp"].size()
-        if "dp" in torch_device_mesh.mesh_dim_names:
-            submesh_dp_size = torch_device_mesh["dp"].size()
-        if "fsdp" in torch_device_mesh.mesh_dim_names:
-            submesh_fsdp_size = torch_device_mesh["fsdp"].size()
-        process_index = process_index // submesh_tp_size
-        num_processes = submesh_fsdp_size * submesh_dp_size
+        if state.distributed_type == DistributedType.DEEPSPEED:
+            # In DeepSpeed, the optimizer sharing level in DP is determined by the config file.
+            # Only considers "dp" and "tp".
+            # Given a device mesh (dp, tp) = (2, 3):
+            # - From the data parallel perspective, ranks should be structured as: 0 0 0 1 1 1
+            # - Processes with the same DP rank will receive the same batch.
+            submesh_tp_size = 1
+            if "tp" in torch_device_mesh.mesh_dim_names:
+                submesh_tp_size = torch_device_mesh["tp"].size()
+            process_index = process_index // submesh_tp_size
+            num_processes = num_processes // submesh_tp_size
+        else:
+            # when device mesh is used, specifically with TP
+            # then there is need to update process_index and num_processes
+            # to bring in the effect of generating same batch across TP ranks
+            # and different batch across FSDP and DP ranks.
+            # Example:
+            # if device mesh is (dp,fsdp,tp) = (2, 2, 3)
+            # ranks would range from 0...11
+            # from data angle ranks should look like 0 0 0 1 1 1 2 2 2 3 3 3
+            # processes with same ranks/ids would receive the same batch
+            # for CP the same as TP applies
+            submesh_fsdp_size = 1
+            submesh_dp_size = 1
+            submesh_tp_size = 1
+            submesh_cp_size = 1
+            if "tp" in torch_device_mesh.mesh_dim_names:
+                submesh_tp_size = torch_device_mesh["tp"].size()
+            if "cp" in torch_device_mesh.mesh_dim_names:
+                submesh_cp_size = torch_device_mesh["cp"].size()
+            if "dp_replicate" in torch_device_mesh.mesh_dim_names:
+                submesh_dp_size = torch_device_mesh["dp_replicate"].size()
+            if "dp_shard" in torch_device_mesh.mesh_dim_names:
+                submesh_fsdp_size = torch_device_mesh["dp_shard"].size()
+            process_index = process_index // (submesh_tp_size * submesh_cp_size)
+            num_processes = submesh_fsdp_size * submesh_dp_size
 
     # Sanity check
     if split_batches:
@@ -1156,18 +1182,35 @@ def prepare_data_loader(
             data_source=sampler.data_source,
             replacement=sampler.replacement,
             num_samples=sampler._num_samples,
-            generator=getattr(sampler, "generator", torch.Generator()),
+            generator=getattr(
+                sampler,
+                "generator",
+                torch.Generator(device=torch.get_default_device() if hasattr(torch, "get_default_device") else "cpu"),
+            ),
             data_seed=data_seed,
         )
 
     if isinstance(dataloader.sampler, RandomSampler) and state.distributed_type == DistributedType.XLA:
         # isinstance(dataloader.sampler, RandomSampler) indicates the original dataloader has `shuffle` enabled.
-        generator = torch.Generator().manual_seed(42)
+        generator = torch.Generator(
+            device=torch.get_default_device() if hasattr(torch, "get_default_device") else "cpu"
+        )
+        seed = int(torch.empty((), dtype=torch.int64).random_().item())
+        generator.manual_seed(seed)
         dataloader.generator = generator
         dataloader.sampler.generator = generator
     # No change if no multiprocess
     if (num_processes != 1 or state.distributed_type == DistributedType.MEGATRON_LM) and not dispatch_batches:
-        if isinstance(new_dataset, IterableDataset):
+        if is_datasets_available():
+            from datasets import IterableDataset as DatasetsIterableDataset
+        if (
+            is_datasets_available()
+            and isinstance(new_dataset, DatasetsIterableDataset)
+            and not split_batches
+            and new_dataset.n_shards > num_processes
+        ):
+            new_dataset = new_dataset.shard(num_shards=num_processes, index=process_index)
+        elif isinstance(new_dataset, IterableDataset):
             if getattr(dataloader.dataset, "generator", None) is not None:
                 synchronized_generator = dataloader.dataset.generator
             new_dataset = IterableDatasetShard(
@@ -1181,7 +1224,11 @@ def prepare_data_loader(
         else:
             if not use_seedable_sampler and hasattr(sampler, "generator"):
                 if sampler.generator is None:
-                    sampler.generator = torch.Generator()
+                    sampler.generator = torch.Generator(
+                        device=torch.get_default_device() if hasattr(torch, "get_default_device") else "cpu"
+                    )
+                    seed = int(torch.empty((), dtype=torch.int64).random_().item())
+                    sampler.generator.manual_seed(seed)
                 synchronized_generator = sampler.generator
             batch_sampler = dataloader.sampler if sampler_is_batch_sampler else dataloader.batch_sampler
             new_batch_sampler = BatchSamplerShard(

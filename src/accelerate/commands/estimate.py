@@ -13,6 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from typing import Optional
+
 import torch
 from huggingface_hub import model_info
 from huggingface_hub.utils import GatedRepoError, RepositoryNotFoundError
@@ -35,7 +37,7 @@ if is_timm_available():
     import timm
 
 
-def verify_on_hub(repo: str, token: str = None):
+def verify_on_hub(repo: str, token: Optional[str] = None):
     "Verifies that the model is on the hub and returns the model info."
     try:
         return model_info(repo, token=token)
@@ -61,7 +63,9 @@ def check_has_model(error):
         return "unknown"
 
 
-def create_empty_model(model_name: str, library_name: str, trust_remote_code: bool = False, access_token: str = None):
+def create_empty_model(
+    model_name: str, library_name: str, trust_remote_code: bool = False, access_token: Optional[str] = None
+):
     """
     Creates an empty model in full precision from its parent library on the `Hub` to calculate the overall memory
     consumption.
@@ -175,7 +179,7 @@ def create_ascii_table(headers: list, rows: list, title: str):
     for i, line in enumerate(rows):
         centered_line = [t.center(column_widths[i]) for i, t in enumerate(line)]
         table += f"{pattern % tuple(centered_line)}\n"
-    table += f'└{"┴".join([in_between * n for n in column_widths])}┘'
+    table += f"└{'┴'.join([in_between * n for n in column_widths])}┘"
 
     return table
 
@@ -184,7 +188,9 @@ def estimate_command_parser(subparsers=None):
     if subparsers is not None:
         parser = subparsers.add_parser("estimate-memory")
     else:
-        parser = CustomArgumentParser(description="Model size estimator for fitting a model onto CUDA memory.")
+        parser = CustomArgumentParser(
+            description="Model size estimator for fitting a model onto device(e.g. cuda, xpu) memory."
+        )
 
     parser.add_argument("model_name", type=str, help="The model name on the Hugging Face Hub.")
     parser.add_argument(
@@ -215,7 +221,7 @@ def estimate_command_parser(subparsers=None):
     return parser
 
 
-def estimate_training_usage(bytes: int, mixed_precision: str, msamp_config: str = None) -> dict:
+def estimate_training_usage(bytes: int, mixed_precision: str, msamp_config: Optional[str] = None) -> dict:
     """
     Given an amount of `bytes` and `mixed_precision`, calculates how much training memory is needed for a batch size of
     1.

@@ -19,13 +19,10 @@ from setuptools import find_packages, setup
 
 
 extras = {}
-extras["quality"] = [
-    "black ~= 23.1",  # hf-doc-builder has a hidden dependency on `black`
-    "hf-doc-builder >= 0.3.0",
-    "ruff ~= 0.6.4",
-]
+extras["quality"] = ["ruff == 0.13.1"]
+
 extras["docs"] = []
-extras["test_prod"] = ["pytest>=7.2.0,<=8.0.0", "pytest-xdist", "pytest-subtests", "parameterized"]
+extras["test_prod"] = ["pytest>=7.2.0", "pytest-xdist", "pytest-subtests", "parameterized", "pytest-order"]
 extras["test_dev"] = [
     "datasets",
     "diffusers",
@@ -43,7 +40,17 @@ extras["testing"] = extras["test_prod"] + extras["test_dev"]
 extras["deepspeed"] = ["deepspeed"]
 extras["rich"] = ["rich"]
 
-extras["test_trackers"] = ["wandb", "comet-ml", "tensorboard", "dvclive"]
+extras["test_fp8"] = ["torchao"]  # note: TE for now needs to be done via pulling down the docker image directly
+extras["test_trackers"] = [
+    "wandb",
+    "comet-ml",
+    "tensorboard",
+    "dvclive",
+    # "mlflow", too many deps that lead to download a very old version of the lib
+    "matplotlib",
+    "swanlab[dashboard]",  # dashboard required for local use
+    "trackio",
+]
 extras["dev"] = extras["quality"] + extras["testing"] + extras["rich"]
 
 extras["sagemaker"] = [
@@ -52,14 +59,14 @@ extras["sagemaker"] = [
 
 setup(
     name="accelerate",
-    version="1.4.0.dev0",
+    version="1.13.0.dev0",
     description="Accelerate",
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
     keywords="deep learning",
     license="Apache",
-    author="The HuggingFace team",
-    author_email="zach.mueller@huggingface.co",
+    author="The Hugging Face team",
+    author_email="transformers@huggingface.co",
     url="https://github.com/huggingface/accelerate",
     package_dir={"": "src"},
     packages=find_packages("src"),
@@ -72,9 +79,9 @@ setup(
             "accelerate-merge-weights=accelerate.commands.merge:main",
         ]
     },
-    python_requires=">=3.9.0",
+    python_requires=">=3.10.0",
     install_requires=[
-        "numpy>=1.17,<3.0.0",
+        "numpy>=1.17",
         "packaging>=20.0",
         "psutil",
         "pyyaml",
@@ -91,7 +98,7 @@ setup(
         "License :: OSI Approved :: Apache Software License",
         "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.10",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
 )

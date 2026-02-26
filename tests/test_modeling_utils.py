@@ -18,7 +18,7 @@ import tempfile
 import unittest
 import warnings
 from collections import OrderedDict
-from typing import Dict, Optional
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -31,6 +31,7 @@ from accelerate.test_utils import (
     require_huggingface_suite,
     require_multi_device,
     require_non_cpu,
+    require_non_hpu,
     torch_device,
 )
 from accelerate.utils.modeling import (
@@ -51,6 +52,7 @@ from accelerate.utils.modeling import (
     retie_parameters,
     set_module_tensor_to_device,
 )
+from accelerate.utils.other import extract_model_from_parallel
 
 
 torch_device = f"{torch_device}:0" if torch_device != "cpu" else "cpu"
@@ -181,6 +183,7 @@ class ModelingUtilsTester(unittest.TestCase):
         model = ModelForTest().to(torch_device)
         self.check_set_module_tensor_for_device(model, torch_device, "meta")
 
+    @require_non_hpu  # hpu does not support device indexing "hpu:1"
     @require_multi_device
     def test_set_module_tensor_between_gpus(self):
         model = ModelForTest().to(torch_device)
@@ -347,6 +350,26 @@ class ModelingUtilsTester(unittest.TestCase):
 
         check_device_map(model, {"linear1": 0, "linear2": 1, "batchnorm": 1})
 
+    def test_check_device_map_invalid_keys(self):
+        model = ModelForTest()
+
+        device_map = {
+            "linear1": "cpu",  # Valid module
+            "batchnorm": "cpu",  # Valid module
+            "linear2": "cpu",  # Valid module
+            "invalid_module": 0,  # Invalid - should trigger warning
+            "another_invalid": 1,  # Invalid - should trigger warning
+        }
+
+        # Test for the warning about invalid keys
+        with self.assertWarns(UserWarning) as cm:
+            check_device_map(model, device_map)
+
+        warning_msg = str(cm.warning)
+        self.assertIn("device_map keys do not match any submodules", warning_msg)
+        self.assertIn("invalid_module", warning_msg)
+        self.assertIn("another_invalid", warning_msg)
+
     def shard_test_model(self, model, tmp_dir):
         module_index = {
             "linear1": "checkpoint_part1.bin",
@@ -447,6 +470,7 @@ class ModelingUtilsTester(unittest.TestCase):
         assert model.batchnorm.running_mean.device == torch.device("meta")
         assert model.linear2.weight.device == torch.device("cpu")
 
+    @require_non_hpu  # hpu does not support device indexing "hpu:1"
     @require_multi_device
     def test_load_checkpoint_in_model_two_gpu(self):
         device_map = {"linear1": 0, "batchnorm": "cpu", "linear2": 1}
@@ -496,7 +520,7 @@ class ModelingUtilsTester(unittest.TestCase):
             assert new_model.float_param.dtype == torch.float16
 
     @parameterized.expand([(None,), ({"": "cpu"},)])
-    def test_load_checkpoint_in_model_unexpected_keys(self, device_map: Optional[Dict]):
+    def test_load_checkpoint_in_model_unexpected_keys(self, device_map: Optional[dict]):
         model = ModelForTest()
 
         state_dict = model.state_dict()
@@ -1042,3 +1066,24 @@ class ModelingUtilsTester(unittest.TestCase):
             with align_module_device(module, align_device):
                 for param in model.parameters(recurse=False):
                     assert param.device == align_device
+
+    def test_extract_model_from_parallel_partial_compile(self):
+        """Partial torch.compile on a submodule should not crash and should preserve the compiled wrapper."""
+        model = ModelForTest()
+        model.linear2 = torch.compile(model.linear2)
+
+        # Precondition: top is not compiled, only submodule is
+        assert not hasattr(model, "_orig_mod")
+        assert hasattr(model.linear2, "_orig_mod")
+
+        # Standard extraction
+        extracted = extract_model_from_parallel(model)
+        x = torch.randn(2, 3)
+        torch.testing.assert_close(model(x), extracted(x))
+        assert isinstance(extracted, ModelForTest)
+        assert hasattr(extracted.linear2, "_orig_mod")
+
+        # Extraction with keep_torch_compile=False
+        extracted_no_keep = extract_model_from_parallel(model, keep_torch_compile=False)
+        assert hasattr(extracted_no_keep.linear2, "_orig_mod")
+        torch.testing.assert_close(model(x), extracted_no_keep(x))

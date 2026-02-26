@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import gc
 import tempfile
 import unittest
 
@@ -28,6 +27,7 @@ from accelerate.test_utils import (
     require_non_torch_xla,
     slow,
 )
+from accelerate.test_utils.testing import AccelerateTestCase
 from accelerate.utils.bnb import load_and_quantize_model
 from accelerate.utils.dataclasses import BnbQuantizationConfig
 from accelerate.utils.memory import clear_device_cache
@@ -44,7 +44,7 @@ class BitsAndBytesConfigIntegration(unittest.TestCase):
 @require_cuda_or_xpu
 @require_bnb
 @require_huggingface_suite
-class MixedInt8EmptyModelTest(unittest.TestCase):
+class MixedInt8EmptyModelTest(AccelerateTestCase):
     # We keep the constants inside the init function and model loading inside setUp function
 
     # We need to test on relatively large models (aka >1b parameters otherwise the quantiztion may not work as expected)
@@ -542,8 +542,7 @@ class MixedInt8LoaddedModelTest(unittest.TestCase):
         del self.model_fp16
         del self.model_8bit
 
-        gc.collect()
-        torch.cuda.empty_cache()
+        clear_device_cache(garbage_collection=True)
 
     def test_memory_footprint(self):
         r"""
@@ -662,8 +661,7 @@ class Bnb4BitEmptyModelTest(unittest.TestCase):
         del self.model_fp16
         del self.model_4bit
 
-        gc.collect()
-        torch.cuda.empty_cache()
+        clear_device_cache(garbage_collection=True)
 
     def test_memory_footprint(self):
         r"""
