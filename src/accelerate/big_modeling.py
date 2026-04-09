@@ -42,6 +42,7 @@ from .utils import (
     is_bnb_available,
     is_mlu_available,
     is_musa_available,
+    is_neuron_available,
     is_npu_available,
     is_sdaa_available,
     is_xpu_available,
@@ -133,7 +134,11 @@ def init_on_device(device: torch.device, include_buffers: Optional[bool] = None)
             param_cls = type(module._parameters[name])
             kwargs = module._parameters[name].__dict__
             kwargs["requires_grad"] = param.requires_grad
+            # Pop non-constructor attributes before creating the parameter, then restore them after
+            _is_hf_initialized = kwargs.pop("_is_hf_initialized", None)
             module._parameters[name] = param_cls(module._parameters[name].to(device), **kwargs)
+            if _is_hf_initialized is not None:
+                module._parameters[name]._is_hf_initialized = _is_hf_initialized
 
     def register_empty_buffer(module, name, buffer, persistent=True):
         old_register_buffer(module, name, buffer, persistent=persistent)
@@ -477,6 +482,8 @@ def dispatch_model(
             model.musa = add_warning(model.musa, model)
         elif is_xpu_available():
             model.xpu = add_warning(model.xpu, model)
+        elif is_neuron_available():
+            model.neuron = add_warning(model.neuron, model)
         else:
             model.cuda = add_warning(model.cuda, model)
 
@@ -499,6 +506,8 @@ def dispatch_model(
             device = f"sdaa:{device}"
         elif is_musa_available() and isinstance(device, int):
             device = f"musa:{device}"
+        elif is_neuron_available() and isinstance(device, int):
+            device = f"neuron:{device}"
         if device != "disk":
             model.to(device)
         else:

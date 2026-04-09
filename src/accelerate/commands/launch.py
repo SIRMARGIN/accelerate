@@ -22,7 +22,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import psutil
 import torch
 
 from accelerate.commands.config import default_config_file, load_config_from_file
@@ -42,6 +41,7 @@ from accelerate.utils import (
     is_hpu_available,
     is_mlu_available,
     is_musa_available,
+    is_neuron_available,
     is_npu_available,
     is_rich_available,
     is_sagemaker_available,
@@ -972,7 +972,7 @@ def launch_command_parser(subparsers=None):
         "--parallelism_config_sp_attn_implementation",
         type=str,
         default="sdpa",
-        help="Attention implementation to use. Can be one of 'flash_attention_2', 'flash_attention_3' or 'sdpa'. Defaults to `sdpa`.",
+        help="Attention implementation to use. Can be one of 'flash_attention_2', 'flash_attention_3', 'sdpa', or a hub-hosted kernel (e.g. 'kernels-community/flash-attn2'). Defaults to `sdpa`.",
     )
 
     # Other arguments of the training scripts
@@ -1231,6 +1231,7 @@ def _validate_launch_command(args):
                     DistributedType.MULTI_MUSA,
                     DistributedType.MULTI_XPU,
                     DistributedType.MULTI_HPU,
+                    DistributedType.MULTI_NEURON,
                 )
                 else False
             )
@@ -1309,6 +1310,8 @@ def _validate_launch_command(args):
                 args.num_processes = torch.npu.device_count()
             elif is_hpu_available():
                 args.num_processes = torch.hpu.device_count()
+            elif is_neuron_available():
+                args.num_processes = torch.neuron.device_count()
             else:
                 args.num_processes = torch.cuda.device_count()
             warned.append(f"\t`--num_processes` was set to a value of `{args.num_processes}`")
@@ -1324,6 +1327,7 @@ def _validate_launch_command(args):
                 or (is_mlu_available() and torch.mlu.device_count() > 1)
                 or (is_sdaa_available() and torch.sdaa.device_count() > 1)
                 or (is_musa_available() and torch.musa.device_count() > 1)
+                or (is_neuron_available() and torch.neuron.device_count() > 1)
                 or (torch.cuda.is_available() and torch.cuda.device_count() > 1)
             )
         ):
@@ -1356,6 +1360,8 @@ def _validate_launch_command(args):
                 ["MPI_LOCALNRANKS", "OMPI_COMM_WORLD_LOCAL_SIZE", "MV2_COMM_WORLD_LOCAL_SIZE"],
                 max(int(args.num_processes / args.num_machines), 1),
             )
+            import psutil
+
             threads_per_process = int(psutil.cpu_count(logical=False) / local_size)
             if threads_per_process > 1:
                 args.num_cpu_threads_per_process = threads_per_process

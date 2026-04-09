@@ -511,7 +511,13 @@ def fsdp2_load_full_state_dict(accelerator, model: torch.nn.Module, full_sd: dic
         return tensor
 
     if accelerator.is_main_process:
-        for (param_name, full_param), sharded_param in zip(full_sd.items(), meta_sharded_sd.values()):
+        for param_name, sharded_param in meta_sharded_sd.items():
+            if param_name not in full_sd:
+                raise KeyError(
+                    f"Parameter '{param_name}' found in sharded model state dict but missing from full state dict. "
+                    f"Full state dict has {len(full_sd)} keys, sharded has {len(meta_sharded_sd)} keys."
+                )
+            full_param = full_sd[param_name]
             device_mesh = sharded_param.device_mesh
             full_param = full_param.detach().to(device_mesh.device_type)
             if isinstance(full_param, DTensor):
@@ -646,11 +652,16 @@ def fsdp2_prepare_model(accelerator, model: torch.nn.Module) -> torch.nn.Module:
     fsdp2_kwargs = {
         "reshard_after_forward": fsdp2_plugin.reshard_after_forward,
         "offload_policy": fsdp2_plugin.cpu_offload,
-        # `fully_shard` doesn't accept `None` in case of `MixedPrecisionPolicy`
+        # `fully_shard` does not accept `None` in case of `MixedPrecisionPolicy`
         "mp_policy": fsdp2_plugin.mixed_precision_policy or MixedPrecisionPolicy(),
         "mesh": mesh[tuple(accelerator.parallelism_config.fsdp_dim_names)] if mesh is not None else None,
-        "ignored_params": get_parameters_from_modules(fsdp2_plugin.ignored_modules, model, accelerator.device),
     }
+
+    # `ignored_params` is only supported in torch >= 2.7.0
+    if is_torch_version(">=", "2.7.0") and fsdp2_plugin.ignored_modules is not None:
+        fsdp2_kwargs["ignored_params"] = get_parameters_from_modules(
+            fsdp2_plugin.ignored_modules, model, accelerator.device
+        )
 
     model_has_params4bit = False
     for name, param in model.named_parameters():
@@ -691,11 +702,15 @@ def fsdp2_prepare_model(accelerator, model: torch.nn.Module) -> torch.nn.Module:
     if not isinstance(model, FSDPModule):
         fully_shard(model, **fsdp2_kwargs)
 
-    if fsdp2_plugin.cpu_ram_efficient_loading:
+    if fsdp2_plugin.cpu_ram_efficient_loading and not model_has_params4bit:
         # If `cpu_ram_efficient_loading` is enabled, only rank 0 loads the weights
         # Other ranks have an empty model on `meta` device, so we need to distribute the weights properly
         # When CPU offloading is enabled, parameters need to stay on CPU after distribution
-        fsdp2_load_full_state_dict(accelerator, model, original_sd, cpu_offload=bool(fsdp2_plugin.cpu_offload))
+        from torch.distributed.fsdp import CPUOffloadPolicy
+
+        fsdp2_load_full_state_dict(
+            accelerator, model, original_sd, cpu_offload=isinstance(fsdp2_plugin.cpu_offload, CPUOffloadPolicy)
+        )
 
     if fsdp2_plugin.cpu_ram_efficient_loading and not model_has_params4bit:
         # We re-register the buffers, as they may not be in the state_dict

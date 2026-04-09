@@ -55,6 +55,7 @@ from ..utils import (
     is_mlu_available,
     is_mps_available,
     is_musa_available,
+    is_neuron_available,
     is_npu_available,
     is_pandas_available,
     is_pippy_available,
@@ -101,6 +102,8 @@ def get_backend():
         return "xpu", torch.xpu.device_count(), torch.xpu.memory_allocated
     elif is_hpu_available():
         return "hpu", torch.hpu.device_count(), torch.hpu.memory_allocated
+    elif is_neuron_available():
+        return "neuron", torch.neuron.device_count(), torch.neuron.memory_allocated
     else:
         return "cpu", 1, lambda: 0
 
@@ -284,6 +287,13 @@ def require_npu(test_case):
     return unittest.skipUnless(is_npu_available(), "test require a NPU")(test_case)
 
 
+def require_neuron(test_case):
+    """
+    Decorator marking a test that requires Neuron. These tests are skipped when there are no Neuron Cores available.
+    """
+    return unittest.skipUnless(is_neuron_available(), "test require Neuron Cores")(test_case)
+
+
 def require_mps(test_case):
     """
     Decorator marking a test that requires MPS backend. These tests are skipped when torch doesn't support `mps`
@@ -300,6 +310,13 @@ def require_huggingface_suite(test_case):
         is_transformers_available() and is_datasets_available(),
         "test requires the Hugging Face suite",
     )(test_case)
+
+
+def require_datasets(test_case):
+    """
+    Decorator marking a test that requires datasets. These tests are skipped when they are not.
+    """
+    return unittest.skipUnless(is_datasets_available(), "test requires the datasets library")(test_case)
 
 
 def require_transformers(test_case):
